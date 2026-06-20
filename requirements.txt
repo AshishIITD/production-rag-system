@@ -4,7 +4,7 @@ streamlit
 langchain
 langchain-community
 langchain-core
-langchain-openai
+langchain-google-genai
 langchain-huggingface
 sentence-transformers
 faiss-cpu
@@ -14,3 +14,4 @@ python-dotenv
 datasets
 sentencepiece
 transformers
+google-generativeai
