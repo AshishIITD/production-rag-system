@@ -1,86 +1,111 @@
+"""
+Streamlit RAGAS Evaluation Dashboard
+Run: streamlit run dashboard.py
+"""
 import streamlit as st
-import requests
 import pandas as pd
-import os
-from datasets import Dataset
-from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from ragas import evaluate
-from ragas.metrics import faithfulness, answer_relevancy
-from ragas.llms import LangchainLLMWrapper
-from ragas.embeddings import LangchainEmbeddingsWrapper
+import plotly.express as px
+import plotly.graph_objects as go
+import httpx
+import json
+from evaluator import load_eval_history
 
-load_dotenv()
+st.set_page_config(
+    page_title="RAG Evaluation Dashboard",
+    page_icon="🔍",
+    layout="wide",
+)
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    st.warning("GOOGLE_API_KEY not set. RAGAS evaluation will fail.")
+API_URL = "http://localhost:8000"
 
-# Gemini LLM + embeddings for RAGAS
-gemini_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=GOOGLE_API_KEY, temperature=0)
-gemini_embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
-ragas_llm = LangchainLLMWrapper(gemini_llm)
-ragas_embeddings = LangchainEmbeddingsWrapper(gemini_embeddings)
+# ── Header ──────────────────────────────────────────────────────────────────
+st.title("🔍 Production RAG — Evaluation Dashboard")
+st.caption("Live RAGAS metrics | Built by Ashish Singh")
 
-st.set_page_config(page_title="RAGAS Evaluation Dashboard", layout="wide")
-st.title("📊 Production RAG System — RAGAS Dashboard")
-st.markdown("Monitoring **Faithfulness** and **Answer Relevancy** via Gemini-powered RAGAS evaluation.")
+# ── Sidebar: Query Interface ─────────────────────────────────────────────────
+with st.sidebar:
+    st.header("Ask a Question")
+    question = st.text_area("Question", placeholder="What is RAG?", height=100)
+    run_eval = st.checkbox("Run RAGAS evaluation", value=False)
+    top_k = st.slider("Top-K chunks", 1, 8, 4)
+    submit = st.button("Submit", type="primary", use_container_width=True)
 
-API_URL = "http://localhost:8000/query"
-
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-query = st.text_input("Enter your query:", "What is LangChain?")
-col1, col2 = st.columns([1, 1])
-
-if st.button("Run Pipeline & Evaluate"):
-    with st.spinner("Querying FastAPI Backend..."):
-        try:
-            response = requests.post(API_URL, json={"query": query, "top_k": 5, "rerank_top_k": 3})
-            response.raise_for_status()
-            data = response.json()
-            answer = data["answer"]
-            contexts = data["contexts"]
-            latency = data["latency_ms"]
-        except Exception as e:
-            st.error(f"Backend error: {e}")
-            st.stop()
-
-    with col1:
-        st.subheader("RAG Output")
-        st.info(answer)
-        st.write(f"**Latency (P95 target <1800ms):** {latency:.2f} ms")
-        for i, ctx in enumerate(contexts):
-            st.caption(f"Context {i+1}: {ctx}")
-
-    with col2:
-        st.subheader("RAGAS Metrics (Gemini Judge)")
-        with st.spinner("Evaluating with RAGAS + Gemini..."):
+    if submit and question.strip():
+        with st.spinner("Retrieving and generating..."):
             try:
-                eval_data = {"question": [query], "answer": [answer], "contexts": [contexts]}
-                dataset = Dataset.from_dict(eval_data)
-                result = evaluate(
-                    dataset,
-                    metrics=[faithfulness, answer_relevancy],
-                    llm=ragas_llm,
-                    embeddings=ragas_embeddings,
-                )
-                eval_scores = result.to_pandas().iloc[0]
-                f_score = eval_scores.get("faithfulness", 0.0)
-                ar_score = eval_scores.get("answer_relevancy", 0.0)
-                st.metric("Faithfulness (Target: 0.91)", f"{f_score:.2f}")
-                st.metric("Answer Relevancy (Target: 0.88)", f"{ar_score:.2f}")
-                st.session_state.history.append({
-                    "Query": query, "Faithfulness": f_score,
-                    "Relevancy": ar_score, "Latency (ms)": latency
-                })
+                resp = httpx.post(f"{API_URL}/query", json={
+                    "question": question,
+                    "run_evaluation": run_eval,
+                    "top_k": top_k,
+                }, timeout=60)
+                data = resp.json()
+                st.success(f"✅ {data['latency_ms']:.0f}ms | {data['model_used']}")
+                st.markdown("**Answer:**")
+                st.write(data["answer"])
+                if data.get("ragas_scores"):
+                    sc = data["ragas_scores"]
+                    cols = st.columns(2)
+                    cols[0].metric("Faithfulness", f"{sc.get('faithfulness', 'N/A'):.2f}" if sc.get('faithfulness') else "N/A")
+                    cols[0].metric("Answer Relevancy", f"{sc.get('answer_relevancy', 'N/A'):.2f}" if sc.get('answer_relevancy') else "N/A")
+                    cols[1].metric("Context Precision", f"{sc.get('context_precision', 'N/A'):.2f}" if sc.get('context_precision') else "N/A")
+                    cols[1].metric("Context Recall", f"{sc.get('context_recall', 'N/A'):.2f}" if sc.get('context_recall') else "N/A")
+                with st.expander("Sources"):
+                    for src in data.get("sources", []):
+                        st.markdown(f"**{src['source']}** (score: {src['score']:.3f})")
+                        st.text(src["content"][:300] + "...")
             except Exception as e:
-                st.error(f"RAGAS error: {e}")
+                st.error(f"API error: {e}")
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+history = load_eval_history()
+
+if not history:
+    st.info("No evaluation history yet. Submit a query with 'Run RAGAS evaluation' checked.")
+    st.stop()
+
+df = pd.DataFrame(history)
+df["timestamp"] = pd.to_datetime(df["timestamp"])
+
+# KPI cards
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Total Queries", len(df))
+c2.metric("Avg Faithfulness", f"{df['faithfulness'].mean():.3f}" if "faithfulness" in df else "N/A")
+c3.metric("Avg Ans. Relevancy", f"{df['answer_relevancy'].mean():.3f}" if "answer_relevancy" in df else "N/A")
+c4.metric("Avg Latency", f"{df['latency_ms'].mean():.0f}ms")
+c5.metric("P95 Latency", f"{df['latency_ms'].quantile(0.95):.0f}ms")
 
 st.divider()
-st.subheader("Query History")
-if st.session_state.history:
-    st.dataframe(pd.DataFrame(st.session_state.history), use_container_width=True)
-else:
-    st.info("No queries evaluated yet.")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("RAGAS Scores Over Time")
+    metric_cols = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
+    available = [c for c in metric_cols if c in df.columns and df[c].notna().any()]
+    if available:
+        fig = px.line(df, x="timestamp", y=available, title="",
+                      color_discrete_sequence=px.colors.qualitative.Set2)
+        fig.update_layout(yaxis_range=[0, 1], legend_title="Metric", height=350)
+        st.plotly_chart(fig, use_container_width=True)
+
+with col2:
+    st.subheader("Average RAGAS Scores")
+    means = {m: df[m].mean() for m in available if m in df.columns}
+    fig2 = go.Figure(go.Bar(
+        x=list(means.keys()),
+        y=list(means.values()),
+        marker_color=["#2ecc71", "#3498db", "#9b59b6", "#e74c3c"],
+        text=[f"{v:.3f}" for v in means.values()],
+        textposition="auto",
+    ))
+    fig2.update_layout(yaxis_range=[0, 1], height=350)
+    st.plotly_chart(fig2, use_container_width=True)
+
+st.subheader("Latency Distribution")
+fig3 = px.histogram(df, x="latency_ms", nbins=20, color_discrete_sequence=["#3498db"])
+fig3.update_layout(height=280)
+st.plotly_chart(fig3, use_container_width=True)
+
+st.subheader("Query Log")
+display_cols = ["timestamp", "question", "latency_ms"] + available
+st.dataframe(df[display_cols].sort_values("timestamp", ascending=False).head(50), use_container_width=True)
