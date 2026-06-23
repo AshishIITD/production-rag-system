@@ -3,8 +3,14 @@ Document ingestion pipeline.
 Supports: PDF, plain text, URLs, raw strings.
 Chunks with overlap and indexes into FAISS.
 """
+import sys
+from unittest.mock import MagicMock
+sys.modules['langchain_community.chat_models.vertexai'] = MagicMock()
+sys.modules['langchain_community.embeddings.vertexai'] = MagicMock()
+
 import re
 import httpx
+
 from pathlib import Path
 from pypdf import PdfReader
 from loguru import logger

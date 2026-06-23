@@ -1,8 +1,14 @@
+import sys
+from unittest.mock import MagicMock
+sys.modules['langchain_community.chat_models.vertexai'] = MagicMock()
+sys.modules['langchain_community.embeddings.vertexai'] = MagicMock()
+
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import tempfile
 import os
+
 import numpy as np
 from loguru import logger
 
